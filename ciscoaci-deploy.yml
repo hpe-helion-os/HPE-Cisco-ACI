@@ -1,0 +1,1044 @@
+#
+# (c) Copyright 2016 Hewlett Packard Enterprise Development Company LP
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+---
+- hosts: NEU-OVS
+  environment:
+    http_proxy: "{{ proxy | default(None) }}"
+    https_proxy: "{{ proxy | default(None) }}"
+  vars:
+#
+# In this playbook, some software is provided by a dependency file while other
+# software is downloaded from Noiro Networks. The following catalog documents
+# what is supposed to be in the dependency file and what is downloaded.
+#
+# Provided by dependency_file:
+# - agent-ovs
+# - libboost-chrono1.55.0
+# - libboost-random1.55.0
+# - libmodelgbp
+# - libopflex
+# - libuv1
+# - openvswitch-lib
+#
+# Downloaded from Noiro Networks:
+# - python-opflex-agent
+# - apic-ml2-driver
+# - apicapi
+#
+    dependency_file: ciscoaci-deploy-resources.tar.gz
+    repo_path: /opt/hlm_packager/hlm/opflex/
+    apic_infra_vlan: 4093
+    apic_infra_mtu: 1600
+    default_apic_system_id: "helion-openstack"
+    neutron_opflex_agent_service: |
+      [Unit]
+      Description=Neutron Cisco OpFlex Plugin Agent
+      After=syslog.target network.target
+      Requires=network.target
+       
+      [Service]
+      User=root
+      PermissionsStartOnly=true
+      ExecStartPre=/bin/mkdir -p /var/lib/opflex-agent-ovs
+      ExecStartPre=/bin/chown -R neutron:neutron /var/lib/opflex-agent-ovs
+      ExecStart=/opt/stack/service/neutron/venv/bin/neutron-opflex-agent --log-file=/var/log/neutron/cisco-opflex-agent.log --config-file=/opt/stack/service/neutron/etc/neutron.conf
+      Restart=always
+       
+      [Install]
+      WantedBy=multi-user.target
+    neutron_apic_host_agent_service: |
+      [Unit]
+      Description=Neutron Cisco APIC Host Agent
+      After=syslog.target network.target
+      Requires=network.target
+
+      [Service]
+      User=neutron
+      PermissionsStartOnly=true
+      ExecStartPre=/bin/mkdir -p /var/run/neutron
+      ExecStartPre=/bin/chown -R neutron:root /var/run/neutron
+      ExecStart=/opt/stack/service/neutron/venv/bin/neutron-cisco-apic-host-agent --log-file=/var/log/neutron/cisco-apic-host-agent.log --config-file=/opt/stack/service/neutron/etc/neutron.conf --config-file=/opt/stack/service/neutron/etc/ml2_conf.ini
+      Restart=always
+
+      [Install]
+      WantedBy=multi-user.target
+    neutron_apic_service_agent_service: |
+      [Unit]
+      Description=Neutron Cisco APIC Service Agent
+      After=syslog.target network.target
+      Requires=network.target
+
+      [Service]
+      User=neutron
+      PermissionsStartOnly=true
+      ExecStartPre=/bin/mkdir -p /var/run/neutron
+      ExecStartPre=/bin/chown -R neutron:root /var/run/neutron
+      ExecStart=/opt/stack/service/neutron/venv/bin/neutron-cisco-apic-service-agent --log-file=/var/log/neutron/cisco-apic-service-agent.log --config-file=/opt/stack/service/neutron/etc/neutron.conf --config-file=/opt/stack/service/neutron/etc/ml2_conf.ini
+      Restart=always
+
+      [Install]
+      WantedBy=multi-user.target
+    neutron_apic_rootwrap_filter: |
+      # neutron-rootwrap command filters for nodes on which neutron is
+      # expected to control network
+      #
+      # This file should be owned by (and only-writeable by) the root user
+      
+      # format seems to be
+      # cmd-name: filter-name, raw-command, user, args
+      
+      [Filters]
+      
+      # cisco-apic filters
+      lldpctl: CommandFilter, lldpctl, root
+      
+      # ip_lib filters
+      ip: IpFilter, ip, root
+      ip_exec: IpNetnsExecFilter, ip, root
+      ovsdb-client: CommandFilter, ovsdb-client, root
+      
+      # gbp-opflex filters
+      supervisord:   CommandFilter, supervisord, root
+      supervisorctl: CommandFilter, supervisorctl, root
+      ip:            CommandFilter, ip, root
+      ethtool:       CommandFilter, ethtool, root
+      mkdir:         CommandFilter, mkdir, root
+      chmod:         CommandFilter, chmod, root
+      chown:         CommandFilter, chown, root
+      rm:            CommandFilter, rm, root
+      ovs-vsctl:     CommandFilter, ovs-vsctl, root
+      ovs-ofctl:     CommandFilter, ovs-ofctl, root
+    interface_conf: |
+      auto {{ opflex_interface.stdout_lines[0] }}
+      iface {{ opflex_interface.stdout_lines[0] }} inet manual
+      pre-up /sbin/ip link set dev {{ opflex_interface.stdout_lines[0] }} mtu {{ apic_infra_mtu }}
+
+      auto {{ opflex_interface.stdout_lines[0] }}.{{ apic_infra_vlan }}
+      iface {{ opflex_interface.stdout_lines[0] }}.{{ apic_infra_vlan }} inet dhcp
+      hwaddress ether {{ interface_mac.results[0].stdout }}
+      vlan-raw-device {{ opflex_interface.stdout_lines[0] }}
+      pre-up /sbin/ip link set dev {{ opflex_interface.stdout_lines[0] }}.{{ apic_infra_vlan }} mtu {{ apic_infra_mtu }}
+      post-up /sbin/route -nv add -net 224.0.0.0/4 dev {{ opflex_interface.stdout_lines[0] }}.{{ apic_infra_vlan }}\n
+    opflex_connection_conf: |
+      {
+          "opflex": {
+              "domain": "comp/prov-OpenStack/ctrlr-[{{ apic_system_id | default(default_apic_system_id) }}]-{{ apic_system_id | default(default_apic_system_id) }}/sw-InsiemeLSOid",
+              "name": "{{ ansible_hostname }}",
+              "peers": [
+                  {"hostname": "{{ opflex_peer_ip | default('10.0.0.30') }}", "port": "{{ opflex_peer_port | default('8009') }}"}
+              ],
+              "ssl": {
+                  "mode": "encrypted"
+              }
+          }
+      }\n
+    opflex_renderer_conf:
+      vxlan: |
+        {
+             "renderers": {
+                 "stitched-mode": {
+                     "ovs-bridge-name": "br-int",
+        
+                     "encap": {
+                         "vxlan" : {
+                             "encap-iface": "br-int_vxlan0",
+                             "uplink-iface": "{{ opflex_interface.stdout_lines[0] }}.{{ apic_infra_vlan }}",
+                             "uplink-vlan": {{ apic_infra_vlan }},
+                             "remote-ip": "{{ vxlan_remote_ip | default('10.0.0.32') }}",
+                             "remote-port": {{ vxlan_remote_port | default('8472') }}
+                         }
+                     },
+                     "flowid-cache-dir": "/var/lib/opflex-agent-ovs/ids"
+                }
+            }
+        }\n
+      vlan: |
+        {
+             "renderers": {
+                 "stitched-mode": {
+                     "ovs-bridge-name": "br-int",
+        
+                     "encap": {
+                         "vlan" : {
+                             "encap-iface": "{{ opflex_interface.stdout_lines[0] }}"
+                         }
+                     },
+                     "flowid-cache-dir": "/var/lib/opflex-agent-ovs/ids"
+                }
+            }
+        }\n
+  tasks:
+############################
+# SET UP OFFLINE RESOURCES #
+############################
+
+  - name: Cisco ACI Integration | HLM | Stat dependency
+    run_once: True
+    delegate_to: localhost
+    stat:
+      path: "{{ dependency_file }}"
+    register: resources_stat
+    changed_when: False
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | HLM | Ensure dependency is present
+    run_once: True
+    delegate_to: localhost
+    when: not resources_stat.stat.exists
+    fail:
+      msg: |
+        {{ dependency_file }} does not exist.
+        Make sure that you put the file in the same directory as this playbook.
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | HLM | Create extraction point for dependency
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    file:
+      path: "{{ repo_path }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0755
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | HLM | Extract dependency
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    unarchive:
+      src: "{{ dependency_file }}"
+      dest: "{{ repo_path }}"
+      owner: root
+      group: root
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | HLM | Make dpkg package list
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    shell: "cd \"{{ repo_path }}\" ; dpkg-scanpackages ."
+    register: dpkg_scanpackages
+    changed_when: False
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | HLM | Write dpkg package list
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    copy:
+      dest: "{{ repo_path }}/Packages"
+      content: "{{ dpkg_scanpackages.stdout }}"
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | HLM | Start Apache
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    service:
+      name: apache2
+      state: started
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | HLM | Store default IP
+    run_once: True
+    delegate_to: localhost
+    set_fact:
+      repo_ip: "{{ ansible_default_ipv4.address }}"
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | NEU-OVS | Install httplib2 dependency for Ansible <2.1
+    sudo: yes
+    apt:
+      name: python-httplib2
+      state: installed
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | NEU-OVS | Test dpkg repo
+    uri: 
+      url: "http://{{ repo_ip }}:79/hlm/opflex/Packages"
+    register: repo_check
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | NEU-OVS | Validate dpkg repo test
+    when: repo_check.status != 200
+    fail:
+      msg: |
+        This playbook created an apt repo, but the repo is not accessible from
+        the target/client/receiver. Make sure that Apache port 79 HTTP is open,
+        is listening, is reachable from remote hosts, and has document root:
+        /opt/hlm_packager
+    tags:
+    - setup
+    - setup-offline
+
+  - name: Cisco ACI Integration | NEU-OVS | Add dpkg repo "opflex"
+    sudo: yes
+    apt_repository:
+      repo: "deb http://{{ repo_ip }}:79/hlm/opflex /"
+      state: present
+      update_cache: yes
+      validate_certs: no
+    tags:
+    - setup
+    - setup-offline
+
+###########################
+# SET UP ONLINE RESOURCES #
+###########################
+
+  - name: Cisco ACI Integration | HLM | Clean scratch working environment
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    file:
+      path: /tmp/scratch
+      state: absent
+    when: keep_scratch is undefined
+    tags:
+    - setup
+    - setup-online
+
+  - name: Cisco ACI Integration | HLM | Download pip packages from Git
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    git:
+      repo: https://github.com/noironetworks/{{ item.project }}.git
+      clone: yes
+      dest: /tmp/scratch/{{ item.project }}
+      version: "{{ item.version | default('HEAD') }}"
+    with_items:
+    - { project: "python-opflex-agent", version: "{{ version_agent | default('stable/liberty') }}" }
+    - { project: "apic-ml2-driver", version: "{{ version_ml2 | default('liberty') }}" }
+    - { project: "apicapi", version: "{{ version_api | default('HEAD') }}" }
+#    - { project: "group-based-policy", version: "{{ version_gbp | default('HEAD') }}" }
+#    - { project: "python-group-based-policy-client", version: "{{ version_gbpclient | default('HEAD') }}" }
+#    - { project: "group-based-policy-ui", version: "{{ version_gbpui | default('HEAD') }}" }
+#    - { project: "group-based-policy-automation", version: "{{ version_gbpautomation | default('HEAD') }}" }
+    tags:
+    - setup
+    - setup-online
+
+  - name: Cisco ACI Integration | HLM | Make scratch wheel directory
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    file:
+      path: /tmp/scratch/third-party-wheelhouse
+      state: directory
+    tags:
+    - setup
+    - setup-online
+
+  - name: Cisco ACI Integration | HLM | Install python-pip
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    apt:
+      name: python-pip
+      state: installed
+    tags:
+    - setup
+    - setup-online
+
+  - name: Cisco ACI Integration | HLM | Make pip wheel packages
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    command: pip wheel --no-deps --wheel-dir /tmp/scratch/third-party-wheelhouse/{{ item }} /tmp/scratch/{{ item }}
+    with_items:
+    - "python-opflex-agent"
+    - "apic-ml2-driver"
+    - "apicapi"
+#    - "group-based-policy"
+#    - "python-group-based-policy-client"
+#    - "group-based-policy-ui"
+#    - "group-based-policy-automation"
+    tags:
+    - setup
+    - setup-online
+
+  - name: Cisco ACI Integration | NEU-OVS | Copy wheel files to targets
+    synchronize:
+      src: /tmp/scratch
+      dest: /tmp/
+      archive: yes
+      delete: yes
+    tags:
+    - setup
+    - setup-online
+ 
+####################
+# INSTALL SOFTWARE #
+####################
+
+  - name: Cisco ACI Integration | NEU-OVS | Identify target wheel files
+    sudo: yes
+    command: find '/tmp/scratch/third-party-wheelhouse'
+    register: wheelhouse_contents
+    changed_when: false
+    tags:
+    - install
+    - install-online
+
+  - name: Cisco ACI Integration | NEU-OVS | Install APIC API, APIC ML2 driver, and OpFlex agent
+    sudo: yes
+    shell: 'source /opt/stack/service/neutron/venv/bin/activate ; pip --proxy ''{{ proxy | default(None) }}'' install ''{{ item }}'''
+    with_items:
+    - "{{ wheelhouse_contents.stdout_lines }}"
+    - "click"
+    when: "('apicapi/' in item or 'apic-ml2-driver/' in item or 'python-opflex-agent/' in item or 'click' in item)"
+    register: install_wheels
+    changed_when: install_wheels.stdout.find('Successfully installed') != -1
+    args:
+      executable: /bin/bash
+    tags:
+    - install
+    - install-online
+
+  - name: Cisco ACI Integration | NEU-SVR | Create APIC ML2 database tables
+    run_once: True
+    sudo: yes
+    shell: 'source /opt/stack/service/neutron/venv/bin/activate ; apic-ml2-db-manage --config-file /opt/stack/service/neutron/etc/ml2_conf.ini upgrade head'
+    delegate_to: "{{ groups['NEU-SVR'] | random }}"
+    register: fix_apicml2_db
+    changed_when: fix_apicml2_db.stderr.find('[alembic.runtime.migration] Running upgrade') != -1
+    args:
+      executable: /bin/bash
+    tags:
+    - install
+    - install-online
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Copy Neutron OpFlex Agent service
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    copy:
+      dest: /etc/systemd/system/neutron-opflex-agent.service
+      content: '{{ neutron_opflex_agent_service }}'
+    register: copy_neutron_opflex_agent_service
+    tags:
+    - install
+    - install-online
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Copy Neutron APIC Host Agent service
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    copy:
+      dest: /etc/systemd/system/neutron-cisco-apic-host-agent.service
+      content: '{{ neutron_apic_host_agent_service }}'
+    register: copy_neutron_apic_host_agent_service
+    tags:
+    - install
+    - install-online
+
+  - name: Cisco ACI Integration | NEU-SVR | Copy Neutron APIC Service Agent service
+    sudo: yes
+    when: "'NEU-SVR' in group_names"
+    copy:
+      dest: /etc/systemd/system/neutron-cisco-apic-service-agent.service
+      content: '{{ neutron_apic_service_agent_service }}'
+    register: copy_neutron_apic_service_agent_service
+    tags:
+    - install
+    - install-online
+
+  - name: Cisco ACI Integration | NEU-OVS | Copy Neutron APIC rootwrap filter
+    sudo: yes
+    copy:
+      dest: /opt/stack/service/neutron/etc/rootwrap.d/cisco-apic.filters
+      content: '{{ neutron_apic_rootwrap_filter }}'
+    tags:
+    - install
+    - install-online
+ 
+  - name: Cisco ACI Integration | NEU-OVS | Reload systemd unit files
+    sudo: yes
+    command: "systemctl daemon-reload"
+    when: |
+      (copy_neutron_opflex_agent_service | changed) or
+      (copy_neutron_apic_host_agent_service | changed) or
+      (copy_neutron_apic_service_agent_service | changed)
+    tags:
+    - install
+    - install-online
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Install agent-ovs
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    apt:
+      name: agent-ovs
+      state: installed
+      force: yes
+    tags:
+    - install
+    - install-offline
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Install Supervisor for OpFlex metadata proxy functionality
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    apt:
+      name: "{{ item }}"
+      state: installed
+    with_items:
+    - supervisor
+    tags:
+    - install
+    - install-offline
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Install LLDP for OpFlex
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    apt:
+      name: "{{ item }}"
+      state: installed
+    with_items:
+    - lldpd
+    tags:
+    - install
+    - install-offline
+
+#########################################
+# COLLECT CONFIG INFORMATION FOR OPFLEX #
+#########################################
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Ensure that LLDP is enabled and running
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    service:
+      name: lldpd
+      enabled: yes
+      state: started
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Check journal of DOWN interfaces
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    stat:
+      path: /tmp/scratch-journal
+    register: ip_links_down_journal
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Replay journal
+    sudo: yes
+    when: "'NEU-SVR' not in group_names and ip_links_down_journal.stat.exists != False and ip_links_down_journal.stat.size > 0"
+    shell: "xargs -I{} -n1 ip link set '{}' down < /tmp/scratch-journal && rm -fv /tmp/scratch-journal"
+    ignore_errors: True
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Get list of DOWN interfaces
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    shell: "ip link | awk '/[0-9]+:.* DOWN / {sub(\"[@:].*\",\"\",$2);print$2}' | tee /tmp/scratch-journal"
+    register: ip_links_down
+    changed_when: False
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Bring UP all the DOWN interfaces
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    shell: "ip link set '{{ item }}' up"
+    ignore_errors: True
+    with_items:
+    - "{{ ip_links_down.stdout_lines }}"
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Identify interface connected to ACI fabric
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    shell: "lldpctl -f keyvalue | awk -F'.' '/chassis\\.Router\\.enabled=on/{print $2}'"
+    register: opflex_interface
+    changed_when: False
+    until: opflex_interface.stdout != ""
+    retries: 60
+    delay: 1
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Remember to keep identified interfaces UP
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    lineinfile:
+      dest: /tmp/scratch-journal
+      regexp: "^{{ item }}$"
+      state: absent
+    with_items:
+    - "{{ opflex_interface.stdout_lines }}"
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Bring DOWN the remaining interfaces that were originally DOWN
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    shell: "xargs -I{} -n1 ip link set '{}' down < /tmp/scratch-journal && rm -fv /tmp/scratch-journal"
+    ignore_errors: True
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Get interface MAC address
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    command: "cat /sys/class/net/{{ item }}/address"
+    with_items:
+    - "{{ opflex_interface.stdout_lines }}"
+    register: interface_mac
+    changed_when: False
+    tags:
+    - configure
+    - configure-3rdparty
+
+####################################
+# CONFIGURE THIRD-PARTY COMPONENTS #
+####################################
+
+  - name: Cisco ACI Integration | NEU-SVR | Create APIC route reflector
+    run_once: True
+    sudo: yes
+    shell: 'source /opt/stack/service/neutron/venv/bin/activate ; apic route-reflector-create --no-secure --apic-ip ''{{ apic_ip | default("10.105.1.10") }}'' --apic-username ''{{ apic_username | default("admin") }}'' --apic-password ''{{ apic_password | default("cisco123") }}'''
+    delegate_to: "{{ groups['NEU-SVR'] | random }}"
+    register: create_apic_route_reflector
+    args:
+      executable: /bin/bash
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Write OpFlex interface configuration to /etc/network/interfaces.d/80-ciscoaci
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    copy:
+      dest: "/etc/network/interfaces.d/80-ciscoaci"
+      content: "{{ interface_conf }}"
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Write DHCP configuration to /etc/dhcp/dhclient.conf
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    lineinfile:
+      dest: /etc/dhcp/dhclient.conf
+      regexp: '^interface "{{ opflex_interface.stdout_lines[0] }}" '
+      state: present
+      line: 'interface "{{ opflex_interface.stdout_lines[0] }}.{{ apic_infra_vlan }}" { send host-name "{{ ansible_hostname }}"; send dhcp-client-identifier 01:{{ interface_mac.results[0].stdout }}; }'
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Restart OpFlex interface
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    shell: "ifdown {{ opflex_interface.stdout_lines[0] }}.{{ apic_infra_vlan }} && ifdown {{ opflex_interface.stdout_lines[0] }} && ifup {{ opflex_interface.stdout_lines[0] }} && ifup {{ opflex_interface.stdout_lines[0] }}.{{ apic_infra_vlan }}"
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Configure agent-ovs connection
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    copy:
+      dest: "/etc/opflex-agent-ovs/conf.d/10-opflex-connection.conf"
+      content: "{{ opflex_connection_conf }}"
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Configure agent-ovs renderer
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    copy:
+      dest: "/etc/opflex-agent-ovs/conf.d/20-aci-renderer.conf"
+      content: "{{ opflex_renderer_conf[opflex_encapsulation_mode | default(\"vxlan\")] }}"
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Delete VXLAN interface in Open vSwitch
+    sudo: yes
+    when: "'NEU-SVR' not in group_names and opflex_encapsulation_mode | default(\"vxlan\") == \"vlan\""
+    shell: "ovs-vsctl del-port br-int br-int_vxlan0"
+    register: rm_ovs_vxlan
+    changed_when: rm_ovs_vxlan.stderr == "" and rm_ovs_vxlan.stdout == ""
+    failed_when: rm_ovs_vxlan.rc != 0 and rm_ovs_vxlan.stdout.find('no port named') != -1
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Delete VLAN interface in Open vSwitch
+    sudo: yes
+    when: "'NEU-SVR' not in group_names and opflex_encapsulation_mode | default(\"vxlan\") == \"vxlan\""
+    shell: "ovs-vsctl del-port br-int {{ opflex_interface.stdout_lines[0] }}"
+    register: rm_ovs_vlan
+    changed_when: rm_ovs_vlan.stderr == "" and rm_ovs_vlan.stdout == ""
+    failed_when: rm_ovs_vlan.rc != 0 and rm_ovs_vlan.stdout.find('no port named') != -1
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Create VXLAN interface in Open vSwitch
+    sudo: yes
+    when: "'NEU-SVR' not in group_names and opflex_encapsulation_mode | default(\"vxlan\") == \"vxlan\""
+    shell: "ovs-vsctl add-port br-int br-int_vxlan0 -- set Interface br-int_vxlan0 type=vxlan options:remote_ip=flow options:key=flow options:dst_port={{ vxlan_remote_port | default('8472') }}"
+    register: mk_ovs_vxlan
+    changed_when: mk_ovs_vxlan.stderr == "" and mk_ovs_vxlan.stdout == ""
+    failed_when: mk_ovs_vxlan.rc != 0 and mk_ovs_vxlan.stdout.find('already exists on bridge') != -1
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Create VLAN interface in Open vSwitch
+    sudo: yes
+    when: "'NEU-SVR' not in group_names and opflex_encapsulation_mode | default(\"vxlan\") == \"vlan\""
+    shell: "ovs-vsctl add-port br-int {{ opflex_interface.stdout_lines[0] }}"
+    register: mk_ovs_vlan
+    changed_when: mk_ovs_vlan.stderr == "" and mk_ovs_vlan.stdout == ""
+    failed_when: mk_ovs_vlan.rc != 0 and mk_ovs_vlan.stdout.find('already exists on bridge') != -1
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Create compatibility configuration directory
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    file:
+      path: "/etc/neutron/plugins/ml2"
+      state: directory
+      owner: root
+      group: root
+    tags:
+    - configure
+    - configure-3rdparty
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Create compatibility symlinks for OpFlex metadata proxy
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    file:
+      path: "{{ item.path }}"
+      state: link
+      src: "{{ item.src }}"
+    with_items:
+    - { path: "/usr/bin/neutron-metadata-agent", src: "/opt/stack/service/neutron/venv/bin/neutron-metadata-agent" }
+    - { path: "/usr/bin/opflex-ep-watcher", src: "/opt/stack/service/neutron/venv/bin/opflex-ep-watcher" }
+    - { path: "/usr/bin/opflex-state-watcher", src: "/opt/stack/service/neutron/venv/bin/opflex-state-watcher" }
+    - { path: "/usr/bin/opflex-ns-proxy", src: "/opt/stack/service/neutron/venv/bin/opflex-ns-proxy" }
+    - { path: "/var/lib/neutron/metadata_proxy", src: "/var/run/neutron/metadata_proxy" }
+    - { path: "/etc/neutron/neutron.conf", src: "/opt/stack/service/neutron/etc/neutron.conf" }
+    - { path: "/etc/neutron/metadata_agent.ini", src: "/opt/stack/service/neutron/etc/metadata_agent.ini" }
+    - { path: "/etc/neutron/plugins/ml2/ml2_conf_cisco.ini", src: "/opt/stack/service/neutron/etc/ml2_conf.ini" }
+    tags:
+    - configure
+    - configure-3rdparty
+
+##################################
+# CONFIGURE OPENSTACK COMPONENTS #
+##################################
+
+  - name: Cisco ACI Integration | NEU-SVR | Generate service_plugins in neutron.conf
+    sudo: yes
+    when: "'NEU-SVR' in group_names"
+    shell: "python -c \"import sys, ConfigParser;config=ConfigParser.ConfigParser();config.read('/opt/stack/service/neutron/etc/neutron.conf');service_plugins = [l.strip() for l in config.get('DEFAULT', 'service_plugins').split(',') if 'l3' not in l.lower()];service_plugins.insert(0, 'cisco_apic_l3');print(','.join(service_plugins))\""
+    register: service_plugins
+    changed_when: False
+    tags:
+    - configure
+    - configure-os
+
+  - name: Cisco ACI Integration | NEU-SVR | Update service_plugins in neutron.conf
+    sudo: yes
+    when: "'NEU-SVR' in group_names"
+    replace:
+      dest: "/opt/stack/service/neutron/etc/neutron.conf"
+      regexp: "^service_plugins.*=.*$"
+      replace: "service_plugins = {{ service_plugins.stdout }}"
+## Unfortunately, OpenStack oslo.config files support duplicate keys, such as:
+##
+## [service_providers]
+## service_provider = LOADBALANCERV2:Octavia:neutron_lbaas.drivers.octavia.driver.OctaviaDriver:default
+## service_provider = LOADBALANCERV2:Haproxy:neutron_lbaas.drivers.haproxy.plugin_driver.HaproxyOnHostPluginDriver
+## service_provider = VPN:strongswan:neutron_vpnaas.services.vpn.service_drivers.ipsec.IPsecVPNDriver:default
+##
+## If the Ansible ini_file module or Python 2.7 ConfigParser or Python 3.4
+## configparser attempts to modify such configurations, only the last one
+## will be kept. The easiest workaround is Ansible replace as shown above.
+##
+## The Ansible ini_file way is reproduced below:
+#    ini_file:
+#      dest: "/opt/stack/service/neutron/etc/neutron.conf"
+#      section: "DEFAULT"
+#      option: "service_plugins"
+#      value: "{{ service_plugins.stdout }}"
+    tags:
+    - configure
+    - configure-os
+
+  - name: Cisco ACI Integration | NEU-SVR | Generate type_drivers in ml2_conf.ini
+    sudo: yes
+    when: "'NEU-SVR' in group_names"
+    shell: "python -c \"import sys,ConfigParser;config=ConfigParser.ConfigParser();config.read('/opt/stack/service/neutron/etc/ml2_conf.ini');type_drivers = [l.strip() for l in config.get('ml2', 'type_drivers').split(',') if 'opflex' not in l.lower()];type_drivers.insert(0, 'opflex');print(','.join(type_drivers))\""
+    register: type_drivers
+    changed_when: False
+    tags:
+    - configure
+    - configure-os
+
+  - name: Cisco ACI Integration | NEU-SVR | Update ml2_conf.ini
+    sudo: yes
+    when: "'NEU-SVR' in group_names"
+    ini_file:
+      dest: "/opt/stack/service/neutron/etc/ml2_conf.ini"
+      section: "{{ item.section }}"
+      option: "{{ item.option }}"
+      value: "{{ item.value | default(None) }}"
+      state: "{{ item.state | default('present') }}"
+    with_items:
+    - { section: "DEFAULT", option: "apic_system_id", value: "{{ apic_system_id | default(default_apic_system_id) }}" }
+    - { section: "ml2", option: "type_drivers", value: "{{ type_drivers.stdout }}" }
+    - { section: "ml2", option: "tenant_network_types", value: "opflex" }
+    - { section: "ml2", option: "mechanism_drivers", value: "cisco_apic_ml2" }
+    - { section: "ovs", option: "enable_tunneling", value: "False" }
+    - { section: "ovs", option: "integration_bridge", value: "br-int" }
+    - { section: "opflex", option: "networks", value: "'*'" }
+    - { section: "ml2_cisco_apic", option: "apic_hosts", value: '{{ apic_ip | default("10.105.1.10") }}' }
+    - { section: "ml2_cisco_apic", option: "apic_username", value: '{{ apic_username | default("admin") }}' }
+    - { section: "ml2_cisco_apic", option: "apic_password", value: '{{ apic_password | default("cisco123") }}' }
+    - { section: "ml2_cisco_apic", option: "apic_use_ssl", value: "True" }
+    - { section: "ml2_cisco_apic", option: "apic_name_mapping", value: "use_name" }
+    - { section: "ml2_cisco_apic", option: "apic_sync_interval", value: "0" }
+    - { section: "ml2_cisco_apic", option: "apic_agent_report_interval", value: "30" }
+    - { section: "ml2_cisco_apic", option: "apic_agent_poll_interval", value: "2" }
+    - { section: "ml2_cisco_apic", option: "enable_aci_routing", value: "True" }
+    - { section: "ml2_cisco_apic", option: "enable_arp_flooding", value: "True" }
+    - { section: "ml2_cisco_apic", option: "apic_provision_infra", value: "True" }
+    - { section: "ml2_cisco_apic", option: "apic_provision_hostlinks", value: "True" }
+    - { section: "ml2_cisco_apic", option: "enable_optimized_dhcp", value: "True" }
+    - { section: "ml2_cisco_apic", option: "enable_optimized_metadata", value: "True" }
+    - { section: "ml2_cisco_apic", option: "integrated_topology_service", value: "True" }
+    tags:
+    - configure
+    - configure-os
+
+  - name: Cisco ACI Integration | NEU-SVR | Update ml2_conf.ini for OpFlex VXLAN encapsulation
+    sudo: yes
+    when: "'NEU-SVR' in group_names and opflex_encapsulation_mode | default(\"vxlan\") == \"vxlan\""
+    ini_file:
+      dest: "/opt/stack/service/neutron/etc/ml2_conf.ini"
+      section: "{{ item.section }}"
+      option: "{{ item.option }}"
+      value: "{{ item.value | default(None) }}"
+      state: "{{ item.state | default('present') }}"
+    with_items:
+    - { section: "ml2_type_vlan", option: "network_vlan_ranges", value: null, state: "absent" }
+    tags:
+    - configure
+    - configure-os
+
+  - name: Cisco ACI Integration | NEU-SVR | Update ml2_conf.ini for OpFlex VLAN encapsulation
+    sudo: yes
+    when: "'NEU-SVR' in group_names and opflex_encapsulation_mode | default(\"vxlan\") == \"vlan\""
+    ini_file:
+      dest: "/opt/stack/service/neutron/etc/ml2_conf.ini"
+      section: "{{ item.section }}"
+      option: "{{ item.option }}"
+      value: "{{ item.value | default(None) }}"
+      state: "{{ item.state | default('present') }}"
+    with_items:
+    - { section: "ml2_type_vlan", option: "network_vlan_ranges", value: "{{ ml2_vlan_physnet | default('physnet1') }}:{{ ml2_vlan_lower | default('1000') }}:{{ ml2_vlan_upper | default('2000') }}" }
+    - { section: "ml2_type_vlan", option: "bridge_mappings", value: "{{ ml2_vlan_physnet | default('physnet1') }}:br-int" }
+    tags:
+    - configure
+    - configure-os
+
+  - name: Cisco ACI Integration | NEU-SVR | Update dhcp_agent.ini
+    sudo: yes
+    when: "'NEU-SVR' in group_names"
+    ini_file:
+      dest: "/opt/stack/service/neutron/etc/dhcp_agent.ini"
+      section: "{{ item.section }}"
+      option: "{{ item.option }}"
+      value: "{{ item.value }}"
+    with_items:
+    - { section: "DEFAULT", option: "dhcp_driver", value: "apic_ml2.neutron.agent.linux.apic_dhcp.ApicDnsmasq" }
+    - { section: "DEFAULT", option: "ovs_integration_bridge", value: "br-int" }
+    - { section: "DEFAULT", option: "enable_isolated_metadata", value: "True" }
+    tags:
+    - configure
+    - configure-os
+ 
+####################
+# REFRESH SERVICES #
+####################
+
+  - name: Cisco ACI Integration | NEU-OVS | Disable and stop service neutron-l3-agent
+    sudo: yes
+    service:
+      name: neutron-l3-agent
+      state: stopped
+      enabled: no
+    tags:
+    - services
+    - services-removeconflicts
+
+  - name: Cisco ACI Integration | NEU-OVS | Disable and stop service neutron-openvswitch-agent
+    sudo: yes
+    service:
+      name: neutron-openvswitch-agent
+      state: stopped
+      enabled: no
+    tags:
+    - services
+    - services-removeconflicts
+
+  - name: Cisco ACI Integration | NEU-OVS | Disable and stop service neutron-metadata-agent
+    sudo: yes
+    service:
+      name: neutron-metadata-agent
+      state: stopped
+      enabled: no
+    tags:
+    - services
+    - services-removeconflicts
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Fix Open vSwitch integration bridge protocols
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    command: "ovs-vsctl set bridge br-int protocols=[]"
+    tags:
+    - services
+    - services-restart
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Enable and restart agent-ovs
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    service:
+      name: agent-ovs
+      state: restarted
+      enabled: yes
+    tags:
+    - services
+    - services-restart
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Enable and restart neutron-opflex-agent
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    service:
+      name: neutron-opflex-agent
+      state: restarted
+      enabled: yes
+    tags:
+    - services
+    - services-restart
+
+  - name: Cisco ACI Integration | NEU-OVS:!NEU-SVR | Enable and restart neutron-cisco-apic-host-agent
+    sudo: yes
+    when: "'NEU-SVR' not in group_names"
+    service:
+      name: neutron-cisco-apic-host-agent
+      state: restarted
+      enabled: yes
+    tags:
+    - services
+    - services-restart
+
+  - name: Cisco ACI Integration | NEU-SVR | Enable and restart neutron-cisco-apic-service-agent
+    sudo: yes
+    when: "'NEU-SVR' in group_names"
+    service:
+      name: neutron-cisco-apic-service-agent
+      state: restarted
+      enabled: yes
+    tags:
+    - services
+    - services-restart
+
+  - name: Cisco ACI Integration | NEU-SVR | Restart neutron-dhcp-agent
+    sudo: yes
+    when: "'NEU-SVR' in group_names"
+    service:
+      name: neutron-dhcp-agent
+      state: restarted
+    tags:
+    - services
+    - services-restart
+
+  - name: Cisco ACI Integration | NEU-SVR | Restart neutron-server
+    sudo: yes
+    when: "'NEU-SVR' in group_names"
+    service:
+      name: neutron-server
+      state: restarted
+    tags:
+    - services
+    - services-restart
+
+############
+# CLEAN UP #
+############
+
+  - name: Cisco ACI Integration | NEU-OVS | Remove scratch temporary files
+    sudo: yes
+    file:
+      path: /tmp/scratch
+      state: absent
+    when: keep_scratch is undefined
+    tags:
+    - setup
+    - setup-online
+
+  - name: Cisco ACI Integration | HLM | Remove scratch temporary files
+    run_once: True
+    delegate_to: localhost
+    sudo: yes
+    file:
+      path: /tmp/scratch
+      state: absent
+    when: keep_scratch is undefined
+    tags:
+    - setup
+    - setup-online
