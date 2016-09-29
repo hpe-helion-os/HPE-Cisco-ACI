@@ -1,4 +1,4 @@
-# Cisco ACI 2.0 Integration with Helion OpenSstack 3.x
+# Cisco ACI 2.0 Integration with Helion OpenStack 3.x
 
 Cisco Application Centric Infrastructure (Cisco ACI) is a software-defined networking (SDN) architecture.
 
