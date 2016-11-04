@@ -4,4 +4,4 @@ Cisco Application Centric Infrastructure (Cisco ACI) is a software-defined netwo
 
 Helion OpenStack supports routing Neutron traffic through a Cisco ACI fabric by integrating with a Cisco Application Policy Infrastructure Controller (APIC).
 
-Integration documentation can be found [here](http://docs.hpcloud.net/#3.x/helion/ihv/cisco/cisco_aci_integration.html#cisco_aci_integration) on the online HPE Helion Documentation site.
+Integration documentation can be found [here](https://docs.hpcloud.com/hos-3.x/#helion/ihv/cisco/cisco_aci_integration.html#cisco_aci_integration) on the online HPE Helion Documentation site.
