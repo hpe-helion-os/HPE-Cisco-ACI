@@ -54,7 +54,7 @@
       PermissionsStartOnly=true
       ExecStartPre=/bin/mkdir -p /var/lib/opflex-agent-ovs
       ExecStartPre=/bin/chown -R neutron:neutron /var/lib/opflex-agent-ovs
-      ExecStart=/opt/stack/service/neutron/venv/bin/neutron-opflex-agent --log-file=/var/log/neutron/cisco-opflex-agent.log --config-file=/opt/stack/service/neutron/etc/neutron.conf
+      ExecStart=/opt/stack/service/neutron/venv/bin/neutron-opflex-agent --log-file=/var/log/neutron/cisco-opflex-agent.log --config-file=/opt/stack/service/neutron/etc/neutron.conf --config-file=/opt/stack/service/neutron/etc/ml2_conf.ini
       Restart=always
        
       [Install]
